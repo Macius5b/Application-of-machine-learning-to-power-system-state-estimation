@@ -10,6 +10,8 @@ The practical part of the project consists of:
   
 The main objective of the project was to investigate whether Machine Learning-based approaches can serve as an effective alternative or complement to traditional state estimation methods, particularly in terms of accuracy and robustness to noisy or incomplete data.
 
+You can find whole project in AP_mgr file, with table of content written in english in description
+
 # Why is State Etimation important 
 <img width="704" height="448" alt="image" src="https://github.com/user-attachments/assets/69ade6d3-fc56-41fe-bc57-747ef5aca673" />
 

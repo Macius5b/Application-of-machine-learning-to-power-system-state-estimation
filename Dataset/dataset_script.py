@@ -1,0 +1,150 @@
+"""
+PowerFactory Dataset Generator
+Author: Aleks Piszczek
+
+This script generates a synthetic dataset from a DIgSILENT PowerFactory network model.
+It iteratively modifies loads, performs power flow calculations, and exports results to CSV.
+"""
+
+import os
+import csv
+import random
+import time
+import powerfactory
+
+# ==============================================================================
+# MAIN SETTINGS
+# ==============================================================================
+NUM_SIMULATIONS = 1000
+LOAD_VARIATION_MIN = 0.80  # 80% of nominal load
+LOAD_VARIATION_MAX = 1.20  # 120% of nominal load
+
+DOCUMENTS_PATH = os.path.join(os.path.expanduser("~"), "Documents")
+OUTPUT_FOLDER = os.path.join(DOCUMENTS_PATH, "PF_Dataset_Output")
+OUTPUT_FILE = 'power_system_dataset.csv'
+
+# Attributes to extract from PowerFactory objects
+BUS_ATTRS = ['m:Pgen', 'm:Qgen', 'm:Pload', 'm:Qload', 'm:Ul', 'm:phiu']
+LINE_ATTRS = ['m:P:bus1', 'm:Q:bus1', 'c:loading']
+TRAFO_ATTRS = ['m:P:bushv', 'm:Q:bushv', 'c:loading']
+
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+def get_attributes(obj, attributes, default_val=0.0):
+    """Safely retrieves a list of attributes from a PowerFactory object."""
+    if obj is None:
+        return [default_val] * len(attributes)
+    try:
+        return [obj.GetAttribute(attr) for attr in attributes]
+    except AttributeError:
+        return [default_val] * len(attributes)
+
+# ==============================================================================
+# MAIN LOGIC
+# ==============================================================================
+def main(app):
+    """Main function to generate the dataset."""
+    start_time = time.time()
+    app.ClearOutputWindow()
+    app.PrintPlain(f"--- Starting dataset generation ({NUM_SIMULATIONS} simulations) ---")
+
+    # Initialize PowerFactory objects
+    ldf = app.GetFromStudyCase("ComLdf")
+    if ldf is None:
+        raise Exception("Load flow object 'ComLdf' not found.")
+
+    all_loads = app.GetCalcRelevantObjects('*.ElmLod')
+    all_buses = sorted(app.GetCalcRelevantObjects('*.ElmTerm'), key=lambda x: x.loc_name)
+    all_lines = sorted(app.GetCalcRelevantObjects('*.ElmLne'), key=lambda x: x.loc_name)
+    all_trafos = sorted(app.GetCalcRelevantObjects('*.ElmTr2'), key=lambda x: x.loc_name)
+
+    if not all_loads or not all_buses:
+        raise Exception("No loads (*.ElmLod) or buses (*.ElmTerm) found in the project.")
+
+    original_loads = {load: load.GetAttribute('plini') for load in all_loads}
+
+    # Prepare output folder and CSV file
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    output_path = os.path.join(OUTPUT_FOLDER, OUTPUT_FILE)
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+
+        # Create CSV header
+        header = ['simulation_id']
+        for bus in all_buses:
+            name = bus.loc_name.replace(' ', '_')
+            header.extend([f"Pnet_{name}", f"Qnet_{name}", f"Angle_{name}"])
+        for line in all_lines:
+            name = line.loc_name.replace(' ', '_')
+            header.extend([f"Pflow_{name}", f"Qflow_{name}", f"Loading_{name}"])
+        for trafo in all_trafos:
+            name = trafo.loc_name.replace(' ', '_')
+            header.extend([f"P_{name}", f"Q_{name}", f"Loading_{name}"])
+        writer.writerow(header)
+
+        # Simulation loop
+        valid_sim_count = 0
+        for i in range(NUM_SIMULATIONS):
+            # Randomize loads
+            for load, original_p in original_loads.items():
+                scaling_factor = random.uniform(LOAD_VARIATION_MIN, LOAD_VARIATION_MAX)
+                load.SetAttribute('plini', original_p * scaling_factor)
+
+            # Execute power flow
+            if ldf.Execute() != 0:
+                if i % 20 == 0:
+                    app.PrintWarn(f"Simulation {i + 1}: SKIPPED (power flow not converged).")
+                continue
+
+            # Collect results
+            row_data = [valid_sim_count]
+
+            buses_res = {bus.loc_name: bus for bus in app.GetCalcRelevantObjects('*.ElmTerm')}
+            lines_res = {line.loc_name: line for line in app.GetCalcRelevantObjects('*.ElmLne')}
+            trafos_res = {trafo.loc_name: trafo for trafo in app.GetCalcRelevantObjects('*.ElmTr2')}
+
+            for bus in all_buses:
+                p_gen, q_gen, p_load, q_load, voltage, angle = get_attributes(buses_res.get(bus.loc_name), BUS_ATTRS)
+                row_data.extend([p_gen - p_load, q_gen - q_load, angle])
+
+            for line in all_lines:
+                row_data.extend(get_attributes(lines_res.get(line.loc_name), LINE_ATTRS))
+
+            for trafo in all_trafos:
+                row_data.extend(get_attributes(trafos_res.get(trafo.loc_name), TRAFO_ATTRS))
+
+            writer.writerow(row_data)
+            valid_sim_count += 1
+
+            if valid_sim_count % 100 == 0:
+                app.PrintInfo(f"{valid_sim_count} valid simulations generated...")
+
+        # Restore original load values
+        for load, original_p in original_loads.items():
+            load.SetAttribute('plini', original_p)
+
+    total_time = time.time() - start_time
+    app.PrintPlain("\n" + "=" * 50)
+    app.PrintPlain(f"--- Dataset generation finished ---")
+    app.PrintInfo(f"Valid simulations: {valid_sim_count}")
+    app.PrintWarn(f"Skipped simulations: {NUM_SIMULATIONS - valid_sim_count}")
+    app.PrintPlain(f"Total execution time: {total_time:.2f} seconds")
+    app.PrintPlain(f"Output CSV saved at: {output_path}")
+    app.PrintPlain("=" * 50)
+
+# ==============================================================================
+# SCRIPT ENTRY POINT
+# ==============================================================================
+if __name__ == "__main__":
+    try:
+        pf_app = powerfactory.GetApplicationExt()
+        if pf_app is None:
+            raise RuntimeError("Failed to connect to PowerFactory application.")
+        main(pf_app)
+    except Exception as e:
+        if 'pf_app' in locals() and pf_app is not None:
+            pf_app.PrintError(f"CRITICAL ERROR DURING EXECUTION:\n{e}")
+        else:
+            print(f"CRITICAL ERROR: {e}")
